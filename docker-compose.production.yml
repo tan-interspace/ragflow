@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Production-ready Docker Compose configuration for RAGFlow
 # This file provides a comprehensive setup with all required services,
 # proper networking, security, monitoring, and resource management.
