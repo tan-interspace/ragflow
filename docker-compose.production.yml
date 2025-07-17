@@ -1,0 +1,543 @@
+version: '3.8'
+
+# Production-ready Docker Compose configuration for RAGFlow
+# This file provides a comprehensive setup with all required services,
+# proper networking, security, monitoring, and resource management.
+
+services:
+  # =============================================================================
+  # MAIN APPLICATION SERVICE
+  # =============================================================================
+  ragflow:
+    image: ${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}
+    container_name: ragflow-server
+    hostname: ragflow-server
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      es01:
+        condition: service_healthy
+        
+    ports:
+      - "${SVR_HTTP_PORT:-9380}:9380"  # Main API port
+      - "80:80"                        # HTTP
+      - "443:443"                      # HTTPS
+      - "5678:5678"                    # Debug port (optional)
+      - "5679:5679"                    # Additional debug port (optional)
+      - "9382:9382"                    # MCP server port (optional)
+      
+    volumes:
+      # Application logs
+      - ragflow_logs:/ragflow/logs
+      # Nginx configuration
+      - ./nginx/ragflow.conf:/etc/nginx/conf.d/ragflow.conf:ro
+      - ./nginx/proxy.conf:/etc/nginx/proxy.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Service configuration
+      - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template:ro
+      - ./entrypoint.sh:/ragflow/entrypoint.sh:ro
+      # Data persistence
+      - ragflow_data:/ragflow/data
+      - ragflow_models:/root/.ragflow
+      # History data (if needed)
+      - ./history_data_agent:/ragflow/history_data_agent
+      
+    environment:
+      - TZ=${TIMEZONE:-UTC}
+      - HF_ENDPOINT=${HF_ENDPOINT:-}
+      - MACOS=${MACOS:-}
+      - PYTHONPATH=/ragflow/
+      - RAGFLOW_ENV=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MAX_CONTENT_LENGTH=${MAX_CONTENT_LENGTH:-1073741824}
+      - DOC_BULK_SIZE=${DOC_BULK_SIZE:-4}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-16}
+      - REGISTER_ENABLED=${REGISTER_ENABLED:-0}
+      
+    env_file: 
+      - .env
+      
+    networks:
+      - ragflow_network
+      
+    restart: unless-stopped
+    
+    # Resource limits for production
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+        
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9380/v1/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=1g
+      
+    # Host networking for Prometheus monitoring
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # =============================================================================
+  # DATABASE SERVICES
+  # =============================================================================
+  
+  # MySQL - Primary database for metadata
+  mysql:
+    image: mysql:8.0.39
+    container_name: ragflow-mysql
+    hostname: ragflow-mysql
+    
+    ports:
+      - "${MYSQL_PORT:-5455}:3306"
+      
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - mysql_logs:/var/log/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./mysql/conf.d:/etc/mysql/conf.d:ro
+      
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_PASSWORD:-infini_rag_flow}
+      - MYSQL_DATABASE=${MYSQL_DBNAME:-rag_flow}
+      - MYSQL_USER=${MYSQL_USER:-ragflow}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-infini_rag_flow}
+      - TZ=${TIMEZONE:-UTC}
+      
+    command: >
+      --max_connections=1000
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --tls_version="TLSv1.2,TLSv1.3"
+      --binlog_expire_logs_seconds=604800
+      --slow_query_log=1
+      --slow_query_log_file=/var/log/mysql/slow.log
+      --long_query_time=2
+      --log-error=/var/log/mysql/error.log
+      --general_log=0
+      
+    networks:
+      - ragflow_network
+      
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+          
+    # Health check
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-infini_rag_flow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      
+    # Security
+    security_opt:
+      - no-new-privileges:true
+
+  # Elasticsearch - Vector database for document search
+  es01:
+    image: elasticsearch:${STACK_VERSION:-8.11.3}
+    container_name: ragflow-elasticsearch
+    hostname: ragflow-elasticsearch
+    
+    ports:
+      - "${ES_PORT:-1200}:9200"
+      - "9300:9300"
+      
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+      - elasticsearch_logs:/usr/share/elasticsearch/logs
+      - ./elasticsearch/config:/usr/share/elasticsearch/config:ro
+      
+    environment:
+      - node.name=ragflow-es-01
+      - cluster.name=ragflow-cluster
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-infini_rag_flow}
+      - bootstrap.memory_lock=false
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - cluster.routing.allocation.disk.watermark.low=5gb
+      - cluster.routing.allocation.disk.watermark.high=3gb
+      - cluster.routing.allocation.disk.watermark.flood_stage=2gb
+      - indices.query.bool.max_clause_count=10000
+      - TZ=${TIMEZONE:-UTC}
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+        
+    networks:
+      - ragflow_network
+      
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: ${ES_MEM_LIMIT:-4G}
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+          
+    # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+      
+    # Security
+    security_opt:
+      - no-new-privileges:true
+
+  # =============================================================================
+  # CACHE AND STORAGE SERVICES
+  # =============================================================================
+  
+  # Redis - Caching and session storage
+  redis:
+    image: valkey/valkey:8
+    container_name: ragflow-redis
+    hostname: ragflow-redis
+    
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+      
+    volumes:
+      - redis_data:/data
+      - redis_logs:/var/log/redis
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
+      
+    command: >
+      redis-server /etc/redis/redis.conf
+      --requirepass ${REDIS_PASSWORD:-infini_rag_flow}
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
+      
+    environment:
+      - TZ=${TIMEZONE:-UTC}
+      
+    networks:
+      - ragflow_network
+      
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+          
+    # Health check
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-infini_rag_flow}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      
+    # Security
+    security_opt:
+      - no-new-privileges:true
+
+  # MinIO - Object storage for files and documents
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-06-13T11-33-47Z
+    container_name: ragflow-minio
+    hostname: ragflow-minio
+    
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      
+    volumes:
+      - minio_data:/data
+      - minio_config:/root/.minio
+      
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER:-rag_flow}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD:-infini_rag_flow}
+      - MINIO_BROWSER_REDIRECT_URL=http://localhost:${MINIO_CONSOLE_PORT:-9001}
+      - TZ=${TIMEZONE:-UTC}
+      
+    command: server --console-address ":9001" /data
+    
+    networks:
+      - ragflow_network
+      
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+          
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+      
+    # Security
+    security_opt:
+      - no-new-privileges:true
+
+# =============================================================================
+# VOLUMES - Persistent storage
+# =============================================================================
+volumes:
+  # Application data
+  ragflow_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/ragflow/logs
+  ragflow_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/ragflow/data
+  ragflow_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/ragflow/models
+      
+  # Database volumes
+  mysql_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/mysql/data
+  mysql_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/mysql/logs
+      
+  # Elasticsearch volumes
+  elasticsearch_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/elasticsearch/data
+  elasticsearch_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/elasticsearch/logs
+      
+  # Redis volumes
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/redis/data
+  redis_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/redis/logs
+      
+  # MinIO volumes
+  minio_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/minio/data
+  minio_config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/minio/config
+
+# =============================================================================
+# NETWORKS - Service communication
+# =============================================================================
+  # =============================================================================
+  # OPTIONAL SERVICES (Uncomment as needed)
+  # =============================================================================
+
+  # Nginx Load Balancer (if running multiple RAGFlow instances)
+  # nginx-lb:
+  #   image: nginx:1.25-alpine
+  #   container_name: ragflow-nginx-lb
+  #   ports:
+  #     - "8080:80"
+  #     - "8443:443"
+  #   volumes:
+  #     - ./nginx/load-balancer.conf:/etc/nginx/nginx.conf:ro
+  #     - ./nginx/ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - ragflow
+  #   networks:
+  #     - ragflow_network
+  #   restart: unless-stopped
+
+  # Prometheus - Monitoring and metrics collection
+  # prometheus:
+  #   image: prom/prometheus:v2.45.0
+  #   container_name: ragflow-prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus_data:/prometheus
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #     - '--storage.tsdb.path=/prometheus'
+  #     - '--web.console.libraries=/etc/prometheus/console_libraries'
+  #     - '--web.console.templates=/etc/prometheus/consoles'
+  #     - '--storage.tsdb.retention.time=30d'
+  #     - '--web.enable-lifecycle'
+  #   networks:
+  #     - ragflow_network
+  #   restart: unless-stopped
+
+  # Grafana - Metrics visualization
+  # grafana:
+  #   image: grafana/grafana:10.0.0
+  #   container_name: ragflow-grafana
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - grafana_data:/var/lib/grafana
+  #     - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+  #     - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+  #   environment:
+  #     - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+  #     - GF_USERS_ALLOW_SIGN_UP=false
+  #   depends_on:
+  #     - prometheus
+  #   networks:
+  #     - ragflow_network
+  #   restart: unless-stopped
+
+  # Elasticsearch Exporter - For Prometheus monitoring
+  # elasticsearch-exporter:
+  #   image: quay.io/prometheuscommunity/elasticsearch-exporter:latest
+  #   container_name: ragflow-es-exporter
+  #   ports:
+  #     - "9114:9114"
+  #   command:
+  #     - '--es.uri=http://ragflow-elasticsearch:9200'
+  #     - '--es.all'
+  #     - '--es.indices'
+  #     - '--es.shards'
+  #   depends_on:
+  #     - es01
+  #   networks:
+  #     - ragflow_network
+  #   restart: unless-stopped
+
+  # Sandbox Executor Manager (for code execution)
+  # sandbox-executor-manager:
+  #   image: ${SANDBOX_EXECUTOR_MANAGER_IMAGE:-infiniflow/sandbox-executor-manager:latest}
+  #   container_name: ragflow-sandbox-executor-manager
+  #   privileged: true
+  #   ports:
+  #     - "${SANDBOX_EXECUTOR_MANAGER_PORT:-9385}:9385"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   environment:
+  #     - TZ=${TIMEZONE:-UTC}
+  #     - SANDBOX_EXECUTOR_MANAGER_POOL_SIZE=${SANDBOX_EXECUTOR_MANAGER_POOL_SIZE:-3}
+  #     - SANDBOX_BASE_PYTHON_IMAGE=${SANDBOX_BASE_PYTHON_IMAGE:-infiniflow/sandbox-base-python:latest}
+  #     - SANDBOX_BASE_NODEJS_IMAGE=${SANDBOX_BASE_NODEJS_IMAGE:-infiniflow/sandbox-base-nodejs:latest}
+  #     - SANDBOX_ENABLE_SECCOMP=${SANDBOX_ENABLE_SECCOMP:-false}
+  #     - SANDBOX_MAX_MEMORY=${SANDBOX_MAX_MEMORY:-256m}
+  #     - SANDBOX_TIMEOUT=${SANDBOX_TIMEOUT:-10s}
+  #   networks:
+  #     - ragflow_network
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   healthcheck:
+  #     test: ["CMD", "curl", "http://localhost:9385/healthz"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   restart: unless-stopped
+
+# =============================================================================
+# NETWORKS - Service communication
+# =============================================================================
+networks:
+  ragflow_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    driver_opts:
+      com.docker.network.bridge.name: ragflow-br
+      com.docker.network.driver.mtu: 1500

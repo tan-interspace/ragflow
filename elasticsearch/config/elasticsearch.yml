@@ -1,0 +1,199 @@
+# =============================================================================
+# Elasticsearch Production Configuration for RAGFlow
+# =============================================================================
+# This configuration provides production-ready settings for Elasticsearch
+# with performance, security, and reliability optimizations
+
+# ======================== Cluster Configuration =========================
+cluster.name: ragflow-cluster
+node.name: ragflow-es-01
+node.roles: [ master, data, ingest, ml ]
+
+# ======================== Network Configuration =========================
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# ======================== Discovery Configuration =========================
+discovery.type: single-node
+# For multi-node cluster, use:
+# discovery.seed_hosts: ["ragflow-es-01", "ragflow-es-02", "ragflow-es-03"]
+# cluster.initial_master_nodes: ["ragflow-es-01", "ragflow-es-02", "ragflow-es-03"]
+
+# ======================== Path Configuration =========================
+path.data: /usr/share/elasticsearch/data
+path.logs: /usr/share/elasticsearch/logs
+path.repo: ["/usr/share/elasticsearch/backups"]
+
+# ======================== Memory Configuration =========================
+bootstrap.memory_lock: false
+# Set in docker-compose or environment:
+# ES_JAVA_OPTS: "-Xms2g -Xmx2g"
+
+# ======================== Security Configuration =========================
+xpack.security.enabled: true
+xpack.security.http.ssl.enabled: false
+xpack.security.transport.ssl.enabled: false
+
+# For SSL/TLS configuration:
+# xpack.security.http.ssl.enabled: true
+# xpack.security.http.ssl.key: /usr/share/elasticsearch/config/certs/elasticsearch.key
+# xpack.security.http.ssl.certificate: /usr/share/elasticsearch/config/certs/elasticsearch.crt
+# xpack.security.http.ssl.certificate_authorities: ["/usr/share/elasticsearch/config/certs/ca.crt"]
+# xpack.security.transport.ssl.enabled: true
+# xpack.security.transport.ssl.key: /usr/share/elasticsearch/config/certs/elasticsearch.key
+# xpack.security.transport.ssl.certificate: /usr/share/elasticsearch/config/certs/elasticsearch.crt
+# xpack.security.transport.ssl.certificate_authorities: ["/usr/share/elasticsearch/config/certs/ca.crt"]
+
+# ======================== Monitoring Configuration =========================
+xpack.monitoring.collection.enabled: true
+xpack.monitoring.elasticsearch.collection.enabled: true
+
+# ======================== Machine Learning Configuration =========================
+xpack.ml.enabled: true
+xpack.ml.max_model_memory_limit: 1gb
+
+# ======================== Index Configuration =========================
+action.auto_create_index: true
+action.destructive_requires_name: true
+
+# ======================== Performance Configuration =========================
+# Thread pools
+thread_pool.write.queue_size: 1000
+thread_pool.search.queue_size: 1000
+thread_pool.get.queue_size: 1000
+
+# Circuit breakers
+indices.breaker.total.limit: 70%
+indices.breaker.fielddata.limit: 40%
+indices.breaker.request.limit: 40%
+
+# Query settings
+indices.query.bool.max_clause_count: 10000
+search.max_buckets: 65536
+
+# ======================== Index Template Settings =========================
+# Default number of shards and replicas for new indices
+index.number_of_shards: 1
+index.number_of_replicas: 0
+# For production with multiple nodes:
+# index.number_of_replicas: 1
+
+# ======================== Disk Allocation Settings =========================
+cluster.routing.allocation.disk.threshold_enabled: true
+cluster.routing.allocation.disk.watermark.low: 5gb
+cluster.routing.allocation.disk.watermark.high: 3gb
+cluster.routing.allocation.disk.watermark.flood_stage: 2gb
+cluster.info.update.interval: 30s
+
+# ======================== Recovery Settings =========================
+cluster.routing.allocation.node_concurrent_recoveries: 2
+cluster.routing.allocation.node_initial_primaries_recoveries: 4
+indices.recovery.max_bytes_per_sec: 100mb
+
+# ======================== Shard Allocation Settings =========================
+cluster.routing.allocation.total_shards_per_node: 1000
+cluster.routing.allocation.same_shard.host: false
+
+# ======================== Indexing Settings =========================
+indices.memory.index_buffer_size: 20%
+indices.memory.min_index_buffer_size: 48mb
+
+# ======================== Search Settings =========================
+search.default_search_timeout: 60s
+search.low_level_cancellation: true
+
+# ======================== Fielddata Settings =========================
+indices.fielddata.cache.size: 20%
+
+# ======================== Request Cache Settings =========================
+indices.requests.cache.size: 2%
+indices.requests.cache.expire: 1h
+
+# ======================== Logging Configuration =========================
+logger.level: INFO
+logger.org.elasticsearch.discovery: DEBUG
+
+# ======================== Snapshot and Restore =========================
+# Repository settings for backups
+# snapshot.max_concurrent_operations: 5
+
+# ======================== Cross-Cluster Search =========================
+# search.remote.connect: false
+
+# ======================== Watcher Configuration =========================
+xpack.watcher.enabled: false
+
+# ======================== Graph Configuration =========================
+xpack.graph.enabled: false
+
+# ======================== SQL Configuration =========================
+xpack.sql.enabled: true
+
+# ======================== Rollup Configuration =========================
+xpack.rollup.enabled: false
+
+# ======================== Transform Configuration =========================
+xpack.transform.enabled: true
+
+# ======================== ILM Configuration =========================
+xpack.ilm.enabled: true
+
+# ======================== SLM Configuration =========================
+xpack.slm.enabled: true
+
+# ======================== CCR Configuration =========================
+xpack.ccr.enabled: false
+
+# ======================== Enrich Configuration =========================
+xpack.enrich.enabled: true
+
+# ======================== EQL Configuration =========================
+xpack.eql.enabled: true
+
+# ======================== Data Streams =========================
+xpack.data_streams.enabled: true
+
+# ======================== Searchable Snapshots =========================
+xpack.searchable.snapshot.enabled: true
+
+# ======================== Runtime Fields =========================
+# No specific configuration needed
+
+# ======================== Custom Settings for RAGFlow =========================
+# Optimize for document search and vector operations
+indices.query.bool.max_clause_count: 10000
+search.max_buckets: 100000
+
+# Increase timeout for complex queries
+search.default_search_timeout: 120s
+
+# Optimize for bulk indexing
+bulk.queue_size: 1000
+bulk.flush_interval: 5s
+
+# Custom analyzers for text processing
+# (These would be defined in index templates or mappings)
+
+# ======================== Deprecation Logging =========================
+logger.deprecation.level: WARN
+
+# ======================== Audit Logging =========================
+# xpack.security.audit.enabled: true
+# xpack.security.audit.logfile.events.include: [authentication_failed, access_denied, tampered_request]
+
+# ======================== CORS Configuration =========================
+http.cors.enabled: true
+http.cors.allow-origin: "*"
+http.cors.allow-methods: OPTIONS, HEAD, GET, POST, PUT, DELETE
+http.cors.allow-headers: X-Requested-With, X-Auth-Token, Content-Type, Content-Length, Authorization, Access-Control-Allow-Headers, Accept
+
+# ======================== HTTP Configuration =========================
+http.max_content_length: 100mb
+http.max_initial_line_length: 4kb
+http.max_header_size: 8kb
+http.compression: true
+http.compression_level: 3
+
+# ======================== Transport Configuration =========================
+transport.tcp.compress: true

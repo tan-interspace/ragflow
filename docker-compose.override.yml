@@ -1,0 +1,288 @@
+# =============================================================================
+# Docker Compose Override for Development
+# =============================================================================
+# This file provides development-friendly overrides for the production
+# Docker Compose configuration. It enables debug features, reduces resource
+# limits, and adds development tools.
+#
+# Usage: docker-compose -f docker-compose.production.yml -f docker-compose.override.yml up
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # RAGFLOW APPLICATION - Development Overrides
+  # =============================================================================
+  ragflow:
+    # Enable debug mode
+    environment:
+      - DEBUG=1
+      - LOG_LEVEL=DEBUG
+      - RAGFLOW_ENV=development
+      - ENABLE_DEBUG_PORTS=1
+      - RAGFLOW_DEBUGPY_LISTEN=1
+      
+    # Add development volumes
+    volumes:
+      # Mount source code for live development
+      - ./api:/ragflow/api
+      - ./rag:/ragflow/rag
+      - ./deepdoc:/ragflow/deepdoc
+      - ./agent:/ragflow/agent
+      - ./web/dist:/ragflow/web/dist
+      # Development logs
+      - ./dev-logs:/ragflow/dev-logs
+      
+    # Reduce resource limits for development
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+          
+    # Enable additional debug ports
+    ports:
+      - "5678:5678"   # Python debugger
+      - "5679:5679"   # Additional debug port
+      - "9380:9380"   # Main application
+      - "9382:9382"   # MCP server
+      
+    # Override command for development
+    # command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "--wait-for-client", "api/ragflow_server.py"]
+
+  # =============================================================================
+  # DATABASE SERVICES - Development Overrides
+  # =============================================================================
+  
+  mysql:
+    # Enable general log for debugging
+    environment:
+      - MYSQL_ROOT_PASSWORD=dev_password
+      
+    command: >
+      --max_connections=200
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --general_log=1
+      --general_log_file=/var/log/mysql/general.log
+      --slow_query_log=1
+      --slow_query_log_file=/var/log/mysql/slow.log
+      --long_query_time=1
+      
+    # Reduce resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+          
+    # Add development volumes
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - mysql_logs:/var/log/mysql
+      - ./mysql/init-dev.sql:/docker-entrypoint-initdb.d/init-dev.sql:ro
+
+  elasticsearch:
+    # Development environment variables
+    environment:
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - cluster.name=ragflow-dev-cluster
+      - node.name=ragflow-dev-es-01
+      - ELASTIC_PASSWORD=dev_password
+      - xpack.security.enabled=false  # Disable security for development
+      
+    # Reduce resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+  redis:
+    # Simpler Redis configuration for development
+    command: >
+      redis-server
+      --requirepass dev_password
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+      
+    # Reduce resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  minio:
+    # Development credentials
+    environment:
+      - MINIO_ROOT_USER=dev_user
+      - MINIO_ROOT_PASSWORD=dev_password
+      - MINIO_BROWSER_REDIRECT_URL=http://localhost:9001
+      
+    # Reduce resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # =============================================================================
+  # DEVELOPMENT TOOLS
+  # =============================================================================
+  
+  # Adminer - Database administration tool
+  adminer:
+    image: adminer:4.8.1
+    container_name: ragflow-adminer
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=ragflow-mysql
+      - ADMINER_DESIGN=pepa-linha
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Redis Commander - Redis administration tool
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: ragflow-redis-commander
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:ragflow-redis:6379:0:dev_password
+      - HTTP_USER=admin
+      - HTTP_PASSWORD=admin
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Elasticsearch Head - Elasticsearch administration tool
+  elasticsearch-head:
+    image: mobz/elasticsearch-head:5
+    container_name: ragflow-es-head
+    ports:
+      - "9100:9100"
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Mailhog - Email testing tool
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: ragflow-mailhog
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Jaeger - Distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.45
+    container_name: ragflow-jaeger
+    ports:
+      - "16686:16686"  # Web UI
+      - "14268:14268"  # HTTP collector
+      - "6831:6831/udp"  # UDP collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # =============================================================================
+  # MONITORING TOOLS (Development)
+  # =============================================================================
+  
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: ragflow-prometheus-dev
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus-dev.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_dev_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Grafana - Metrics visualization
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: ragflow-grafana-dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_dev_data:/var/lib/grafana
+      - ./monitoring/grafana/dev-dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dev-datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=true
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+    networks:
+      - ragflow_network
+    restart: unless-stopped
+    profiles:
+      - development
+
+# =============================================================================
+# DEVELOPMENT VOLUMES
+# =============================================================================
+volumes:
+  # Development-specific volumes
+  prometheus_dev_data:
+    driver: local
+  grafana_dev_data:
+    driver: local
+  dev_logs:
+    driver: local
+
+# =============================================================================
+# DEVELOPMENT PROFILES
+# =============================================================================
+# To use development tools, run:
+# docker-compose -f docker-compose.production.yml -f docker-compose.override.yml --profile development up
